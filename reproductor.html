@@ -84,6 +84,9 @@ function onYouTubeIframeAPIReady(){
     events: {
       onReady: () => {
         listo = true;
+        // Mudo de entrada: es lo unico que el navegador deja
+        // reproducir sin un click previo.
+        player.mute();
         player.setVolume(volumen);
         // Si Lua ya había pedido algo, recién ahora se puede hacer.
         if (pendiente) { aplicar(pendiente); pendiente = null; }
@@ -109,11 +112,47 @@ function aplicar(m){
 
   if (m.accion === 'poner') {
     apagado(false);
+
+    // ============================================================
+    //  ARRANCAR MUTEADO, DESPUES SUBIR EL VOLUMEN
+    //
+    //  Los navegadores --- y el de FiveM es uno --- BLOQUEAN la
+    //  reproduccion automatica con sonido si no hubo un click del
+    //  usuario. Como acá nunca hay un click, arrancar con volumen
+    //  hacia que el video no arrancara: ni imagen ni audio, y sin
+    //  ningun error. Silencio y pantalla negra.
+    //
+    //  Muteado SI se permite reproducir solo. Asi que se arranca
+    //  mudo, y una vez que ya esta reproduciendo se le sube el
+    //  volumen: a esa altura ya no lo bloquea nadie.
+    // ============================================================
+    player.mute();
     player.loadVideoById({
       videoId: m.video,
       startSeconds: Math.max(0, Math.floor(m.desde || 0)),
     });
-    player.setVolume(volumen);
+    player.playVideo();
+
+    // Se insiste hasta que de verdad este reproduciendo. Un solo
+    // intento a los 500 ms fallaba cuando el video tardaba en
+    // bufferear.
+    let intentos = 0;
+    const subir = setInterval(() => {
+      intentos++;
+      try {
+        if (player.getPlayerState() === YT.PlayerState.PLAYING) {
+          if (volumen > 0) player.unMute();
+          player.setVolume(volumen);
+          clearInterval(subir);
+        } else {
+          player.playVideo();
+        }
+      } catch (e) {}
+
+      // Diez segundos y se deja de insistir, para no quedar con un
+      // intervalo corriendo para siempre si el video no existe.
+      if (intentos > 20) clearInterval(subir);
+    }, 500);
 
   } else if (m.accion === 'parar') {
     apagado(true);
@@ -121,7 +160,12 @@ function aplicar(m){
 
   } else if (m.accion === 'volumen') {
     volumen = Math.max(0, Math.min(100, Math.round(m.valor || 0)));
-    try { player.setVolume(volumen); } catch(e) {}
+    try {
+      player.setVolume(volumen);
+      // Si arrancó muteado y ahora hay volumen, hay que sacarle el
+      // mute a mano: setVolume solo no lo desmutea.
+      if (volumen > 0) player.unMute(); else player.mute();
+    } catch(e) {}
 
     // ============================================================
     //  A volumen cero, PAUSAR.

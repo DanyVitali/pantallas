@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+/* ============================================================
+   EL REPRODUCTOR
+
+   Esta pagina NO la ve nadie en una ventana: se renderiza a una
+   textura y esa textura se pega arriba de la pantalla del prop.
+   Por eso no hay ni un boton: todo se maneja desde Lua con
+   SendDuiMessage.
+
+   Fondo negro y sin margenes. Cualquier borde blanco quedaria
+   como un marco raro pegado al televisor.
+   ============================================================ */
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#000;overflow:hidden}
+#player{width:100%;height:100%}
+
+/* Lo que se ve cuando no hay nada puesto. */
+#apagado{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:18px;
+  background:#000;color:#d9b45a;
+  font-family:Impact,'Arial Narrow',sans-serif;
+  letter-spacing:8px;text-transform:uppercase;
+}
+#apagado .logo{font-size:64px;text-shadow:4px 4px 0 #000}
+#apagado .sub{font-size:20px;color:#5f5a50;letter-spacing:6px}
+#apagado.off{display:none}
+</style>
+</head>
+<body>
+
+<div id="player"></div>
+
+<div id="apagado">
+  <div class="logo">San Andreas</div>
+  <div class="sub">sin señal</div>
+</div>
+
+<script src="https://www.youtube.com/iframe_api"></script>
+<script>
+// ============================================================
+//  PUENTE CON LUA
+//
+//  Lua manda mensajes con SendDuiMessage y llegan acá como
+//  'message'. Nunca al revés: un DUI no puede contestarle a Lua.
+//  Por eso todo lo que el servidor necesita saber (qué está
+//  sonando, en qué segundo) lo lleva él y no se lo pregunta a esta
+//  página.
+// ============================================================
+let player = null;
+let listo = false;
+
+// Lo último que mandó Lua mientras el player todavía no existía.
+// El iframe API tarda en cargar y los primeros mensajes llegan
+// antes; sin esto, la pantalla se quedaba negra hasta que alguien
+// volvía a apretar play.
+let pendiente = null;
+
+// El volumen que quiere Lua, de 0 a 100. Se guarda aparte porque
+// puede llegar antes que el player.
+let volumen = 0;
+
+function apagado(v){
+  document.getElementById('apagado').classList.toggle('off', !v);
+}
+
+function onYouTubeIframeAPIReady(){
+  player = new YT.Player('player', {
+    height: '100%',
+    width: '100%',
+    playerVars: {
+      controls: 0,        // sin barra: nadie puede tocarla igual
+      disablekb: 1,
+      modestbranding: 1,
+      rel: 0,             // sin sugeridos al final
+      fs: 0,
+      iv_load_policy: 3,  // sin anotaciones
+      playsinline: 1,
+    },
+    events: {
+      onReady: () => {
+        listo = true;
+        player.setVolume(volumen);
+        // Si Lua ya había pedido algo, recién ahora se puede hacer.
+        if (pendiente) { aplicar(pendiente); pendiente = null; }
+      },
+
+      // ============================================================
+      //  Si el video no se puede reproducir, se apaga y listo.
+      //
+      //  Pasa seguido: videos bloqueados por región, borrados, o
+      //  que el dueño no deja embeber. Sin esto la pantalla queda
+      //  con el cartel de error de YouTube pegado para siempre.
+      // ============================================================
+      onError: () => {
+        apagado(true);
+        try { player.stopVideo(); } catch(e) {}
+      },
+    },
+  });
+}
+
+function aplicar(m){
+  if (!listo || !player) { pendiente = m; return; }
+
+  if (m.accion === 'poner') {
+    apagado(false);
+    player.loadVideoById({
+      videoId: m.video,
+      startSeconds: Math.max(0, Math.floor(m.desde || 0)),
+    });
+    player.setVolume(volumen);
+
+  } else if (m.accion === 'parar') {
+    apagado(true);
+    try { player.stopVideo(); } catch(e) {}
+
+  } else if (m.accion === 'volumen') {
+    volumen = Math.max(0, Math.min(100, Math.round(m.valor || 0)));
+    try { player.setVolume(volumen); } catch(e) {}
+
+    // ============================================================
+    //  A volumen cero, PAUSAR.
+    //
+    //  Un video sonando a cero igual descarga y decodifica: cinco
+    //  pantallas en el mapa serían cinco streams corriendo para
+    //  nadie. Pausado no gasta.
+    //
+    //  Al volver a subir el volumen se reanuda, y el servidor manda
+    //  el segundo correcto, así que no se pierde la sincronía con
+    //  los que sí estaban escuchando.
+    // ============================================================
+    try {
+      const estado = player.getPlayerState();
+      if (volumen <= 0 && estado === YT.PlayerState.PLAYING) {
+        player.pauseVideo();
+      } else if (volumen > 0 && estado === YT.PlayerState.PAUSED) {
+        player.playVideo();
+      }
+    } catch(e) {}
+
+  } else if (m.accion === 'sincronizar') {
+    // Alguien llegó tarde o volvió a rango: saltar al segundo que
+    // corresponde en vez de arrancar de cero.
+    try {
+      const donde = Math.max(0, Math.floor(m.desde || 0));
+      if (Math.abs(player.getCurrentTime() - donde) > 2) {
+        player.seekTo(donde, true);
+      }
+    } catch(e) {}
+  }
+}
+
+window.addEventListener('message', (e) => {
+  const m = e.data;
+  if (!m || !m.accion) return;
+
+  if (m.accion === 'volumen') {
+    volumen = Math.max(0, Math.min(100, Math.round(m.valor || 0)));
+  }
+
+  aplicar(m);
+});
+</script>
+</body>
+</html>
